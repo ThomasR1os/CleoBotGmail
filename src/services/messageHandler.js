@@ -1223,6 +1223,7 @@ class MessageHandler {
     }
   }
 
+
   async handleCrearCabeceraCotizacion(numero, mensaje) {
     if (!this.quotationState[numero] || !this.quotationState[numero].step) {
       if (!this.quotationState[numero]) this.quotationState[numero] = {};
@@ -1513,6 +1514,13 @@ class MessageHandler {
         }
         state.payment_method_id = metodo.id;
 
+        try {
+          await this.validarStockAntesDePdf(numero);
+          // No detenemos el flujo: solo mostramos advertencia en caso corresponda
+        } catch (e) {
+          console.error("Error en validarStockAntesDePdf:", e?.message || e);
+        }
+
         // Crear cotización (header)
         const payload = {
           client_id: state.client_id,
@@ -1605,6 +1613,69 @@ class MessageHandler {
         break;
       }
     }
+  }
+
+  // 🔎 Valida cantidades vs stock antes de generar el PDF (regla GGP-30)
+  async validarStockAntesDePdf(numero) {
+    const state = this.quotationState[numero];
+
+    if (
+      !state ||
+      !Array.isArray(state.products) ||
+      state.products.length === 0
+    ) {
+      return false; // nada que validar
+    }
+
+    const advertencias = [];
+
+    for (const p of state.products) {
+      try {
+        const stockInfo = await obtenerStockPorId(p.product_id); // ya lo tienes importado arriba
+        const totalStock = Number(stockInfo?.total_stock || 0);
+        const qty = Number(p.quantity || 0);
+
+        // sin stock o cantidad cotizada > stock
+        if (totalStock <= 0 || qty > totalStock) {
+          advertencias.push({
+            descripcion: p.descripcion,
+            sku: p.sku,
+            quantity: qty,
+            stock: totalStock,
+          });
+        }
+      } catch (err) {
+        console.error(
+          "Error consultando stock para validación GGP-30:",
+          err?.message || err
+        );
+        // si falla la consulta, por ahora no frenamos nada
+      }
+    }
+
+    if (!advertencias.length) {
+      return false; // todo ok
+    }
+
+    let mensaje = "⚠️ *Advertencia de stock (GGP-30)*\n\n";
+    mensaje +=
+      "Se han cotizado productos cuya cantidad supera el stock disponible o que actualmente no tienen stock.\n";
+    mensaje +=
+      "En estos casos se debe considerar que el producto se venderá por *importación*.\n\n";
+
+    advertencias.forEach((a, index) => {
+      mensaje += `${index + 1}. *${a.descripcion}*\n`;
+      mensaje += `   SKU: ${a.sku}\n`;
+      mensaje += `   Cantidad cotizada: ${a.quantity}\n`;
+      mensaje += `   Stock disponible: ${a.stock}\n\n`;
+    });
+
+    mensaje +=
+      "Ten en cuenta esta condición al momento de cerrar la venta con el cliente.";
+
+    await whatsappService.sendMessage(numero, mensaje);
+
+    return true; // hubo advertencias
   }
 }
 
